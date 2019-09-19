@@ -1,18 +1,3 @@
-import sys
-
-###############################
-## Behavior Tree Definations ##
-###############################
-
-
-###### Required Variables #####
-# TODO: sort for priority
-# TODO: node energy
-# TODO: should have a break point when doing nothing
-
-# Energy consume
-ENERGY_CONSUME = 1
-
 # Blackboard objects
 BLACKBOARD = {
     "BATTERY_LEVEL": 100,
@@ -20,304 +5,276 @@ BLACKBOARD = {
     "GENERAL": True,
     "DUSTY_SPOT": True,
     "HOME_PATH": "DEFAULT PATH BACK TO HOME",
-	}
-
-# reset BLACKBOARD
-def resetBlackboard():
-    BLACKBOARD['BATTERY_LEVEL'] = 100
-    BLACKBOARD['SPOT'] = True
-    BLACKBOARD['GENERAL'] = True
-    BLACKBOARD['DUSTY_SPOT'] = True
-    BLACKBOARD['HOME_PATH'] = "DEFAULT PATH BACK TO HOME"
+    "COUNT": 0  # used for timer
+    }
 
 # Status
 class STATUS():
-    FAILED = -1
-    SUCCEEDED = 0
-    RUNNING = 1
+    FAILED = 0
+    SUCCEEDED = 1
+    RUNNING = 2
 
-
-#### Node class definitions ###
-
-# Node
-# -- children: node or derived class instance
-# -- wait: used by priority composite
-# -- time: duration
+# node
 class node(object):
-    def __init__(self, children = None, status = None, wait = 1, time = 0):
-        if children == None:
-            self.children = list()
-        else:
-            self.children = children
-        self.status = status
-        self.wait = wait
-        self.time = time
+    def __init__(self):
+        self.status = None
+
+    def reset(self):
+        self.status = None
+
+# leaf node
+class leaf(node):
+    pass
+
+# non-leaf node
+# before return SUCCEEDED or FAILED, reset all children recursively
+class nonLeaf(node):
+    def __init__(self, children = None):
+        super(nonLeaf, self).__init__()
+        
+        if children is None:
+            children = list()
+
+        self.children = children
 
     def addChild(self, child):
         if not child is None:
             self.children.append(child)
+ 
+    def reset(self):
+        super(nonLeaf, self).reset()
+        for child in self.children:
+            child.reset()
 
-# Task
-class task(node):
-    def run(self):
-        assert self.children.__len__() == 0               # task node has no child
-        if BLACKBOARD['BATTERY_LEVEL'] <= 0:              # take care of battery level
-            self.status = STATUS.FAILED
-            return STATUS.FAILED
-        else:
-            if BLACKBOARD['BATTERY_LEVEL'] - ENERGY_CONSUME >= 0:
-                BLACKBOARD['BATTERY_LEVEL'] -= ENERGY_CONSUME
-            else:
-                self.status = STATUS.FAILED
-                return STATUS.FAILED
-
-# Condition
-class condition(node):
-    def run(self):
-        assert self.children.__len__() == 0               # condition node has no child           
-
-# Composite
-class composite(node):
+# task
+class task(leaf):
     pass
 
-# Decorator
-class decorator(node):
-    def run(self):
-        assert self.children.__len__() == 1               # each decorator would only have one child
-        assert self.children[0].time == 0                 # time in attached child should be 0
+# condition
+class condition(leaf):
+    pass
 
+# composite
+class composite(nonLeaf):
+    # find if has last RUNNING child
+    def findLastRunning(self):
+        lastRunning = False
+        lastRunningIdx = 0
+        for child in self.children:
+            if child.status == STATUS.RUNNING:
+                lastRunning = True
+                lastRunningIdx = self.children.index(child)
+                break
+        return lastRunning, lastRunningIdx
+
+# decorator
+# each would only have one child
+class decorator(nonLeaf):
+    def run(self):
+        assert self.children.__len__() == 1
+
+# Priority
+# every time start from weight 1
+# because priority is root in this problem, so we need to reset BLACKBOARD['COUNT'] to 0
+class priority(composite):
+    def run(self):
+        for child in self.children:
+            child.status = child.run()
+            if child.status != STATUS.FAILED:
+                if child.status == STATUS.SUCCEEDED:
+                    self.reset()
+                    return STATUS.SUCCEEDED
+                else:
+                    return STATUS.RUNNING
+        self.reset()
+        return STATUS.FAILED
+
+    def reset(self):
+        super(priority, self).reset()
+        BLACKBOARD['COUNT'] = 0
+
+# Sequence
+# if has last RUNNING child, from it; else from left
+class sequence(composite):
+    def run(self):
+        lastRunning, startIdx = self.findLastRunning()
+        if not lastRunning:
+            startIdx = 0
+
+        for child in self.children[startIdx:]:
+            child.status = child.run()
+            if child.status != STATUS.SUCCEEDED:
+                if child.status == STATUS.FAILED:
+                    self.reset()
+                    return STATUS.FAILED
+                else:
+                    return STATUS.RUNNING
+        self.reset()
+        return STATUS.SUCCEEDED
+
+# Selector
+# if has last running child, from it; else from left
+class selection(composite):
+    def run(self):
+        lastRunning, startIdx = self.findLastRunning()
+        if not lastRunning:
+            startIdx = 0
+            
+        for child in self.children[startIdx:]:
+            child.status = child.run()
+            if child.status != STATUS.FAILED:
+                if child.status == STATUS.SUCCEEDED:
+                    self.reset()
+                    return STATUS.SUCCEEDED
+                else:
+                    return STATUS.RUNNING
+        self.reset()
+        return STATUS.FAILED
+
+# Timer
+class timer(decorator):
+    def __init__(self, children = None, time = None):
+        super(timer, self).__init__(children)
+        self.time = time
+
+    def run(self):
+        super(timer, self).run()
+        child = self.children[0]
+
+        if BLACKBOARD['COUNT'] < self.time:
+            BLACKBOARD['COUNT'] += 1
+            child.status = child.run()
+            return STATUS.RUNNING
+        else:
+            BLACKBOARD['COUNT'] = 0
+            self.reset()
+            return STATUS.SUCCEEDED
+
+# Until Fail
+class untilFail(decorator):
+    def run(self):
+        super(untilFail, self).run()
+        child = self.children[0]
+        child.status = child.run()
+        if child.status != STATUS.FAILED:
+            return STATUS.RUNNING
+        else:
+            self.reset()
+            return STATUS.SUCCEEDED
+
+# Logical negation
+class logicalNegation(decorator):
+    def run(self):
+        super(logicalNegation, self).run()
+        child = self.children[0]
+        child.status = child.run()
+        if child.status == STATUS.SUCCEEDED:
+            self.reset()
+            return STATUS.FAILED
+        elif child.status == STATUS.FAILED:
+            self.reset()
+            return STATUS.SUCCEEDED
+        else:
+            return STATUS.RUNNING
+                
 # Task -- FIND HOME
+# simulate finding a path to home and store it to BALCKBOARD
 class findHome(task):
     def run(self):
-        super(findHome, self).run()
-        BLACKBOARD['HOME_PATH'] = "A PATH TO HOME"        # simulate finding a path to home and store it to BALCKBOARD
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        print("Find home")
+        BLACKBOARD['HOME_PATH'] = "A PATH TO HOME"
+        return STATUS.SUCCEEDED
 
 # Task -- GO HOME
 class goHome(task):
     def run(self):
-        super(goHome, self).run()
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        print("Go home")
+        return STATUS.SUCCEEDED
 
 # Task -- DO NOTHING
 class doNothing(task):
     def run(self):
-        super(doNothing, self).run()
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        print("Do nothing")
+        return STATUS.SUCCEEDED
 
 # Task -- DOCK
+# charge to full battery level
 class dock(task):
     def run(self):
-        super(dock, self).run()
-        BLACKBOARD['BATTERY_LEVEL'] = 100               # charge to full battery level
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        print("Dock")
+        BLACKBOARD['BATTERY_LEVEL'] = 100
+        return STATUS.SUCCEEDED
 
 # Task -- CLEAN SPOT
+# BATTERY_LEVEL - 1
 class cleanSpot(task):
     def run(self):
-        super(cleanSpot, self).run()
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        print("Clean spot")
+        BLACKBOARD['BATTERY_LEVEL'] -= 1
+        return STATUS.SUCCEEDED
 
 # Task -- DONE SPOT
+# BATTERY_LEVEL - 2
+# SPOT in BALCKBOARD turns to FALSE
 class doneSpot(task):
     def run(self):
-        super(doneSpot, self).run()
-        BLACKBOARD['SPOT'] = False                      # SPOT in BALCKBOARD turns to FALSE
+        BLACKBOARD['BATTERY_LEVEL'] -= 2
+        BLACKBOARD['SPOT'] = False
         print("DONE SPOT!")
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        return STATUS.SUCCEEDED
 
 # Task -- DONE GENERAL
+# BATTERY_LEVEL - 2
+# GENERAL in BALCKBOARD turns to FALSE
 class doneGeneral(task):
     def run(self):
-        super(doneGeneral, self).run()
-        BLACKBOARD['GENERAL'] = False                   # GENERAL in BALCKBOARD turns to FALSE
+        BLACKBOARD['BATTERY_LEVEL'] -= 2
+        BLACKBOARD['GENERAL'] = False
         print("DONE GENERAL!")
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        return STATUS.SUCCEEDED
 
 # Task -- CLEAN
+# BATTERY_LEVEL - 2
 class clean(task):
     def run(self):
-        super(clean, self).run()
-        self.status = STATUS.SUCCEEDED;
-        return self.status
+        BLACKBOARD['BATTERY_LEVEL'] -= 2
+        return STATUS.SUCCEEDED
 
 # Condition -- BATTERY < 30%
 class batteryLessThan30(condition):
     def run(self):
-        super(batteryLessThan30, self).run()
         if BLACKBOARD['BATTERY_LEVEL'] < 30:
-            self.status = STATUS.SUCCEEDED
+            return STATUS.SUCCEEDED
         else:
-            self.status = STATUS.FAILED
-        return self.status
+            return STATUS.FAILED
 
 # Condition -- GENERAL
 class generalCondition(condition):
     def run(self):
-        super(generalCondition, self).run()
         if BLACKBOARD['GENERAL']:
-            self.status = STATUS.SUCCEEDED
+            return STATUS.SUCCEEDED
         else:
-            self.status = STATUS.FAILED
-        return self.status
+            return STATUS.FAILED
 
 # Condition -- SPOT
 class spotCondition(condition):
     def run(self):
-        super(spotCondition, self).run()
         if BLACKBOARD['SPOT']:
-            self.status = STATUS.SUCCEEDED
+            return STATUS.SUCCEEDED
         else:
-            self.status = STATUS.FAILED
-        return self.status
+            return STATUS.FAILED
 
 # Condition -- DUSTY SPOT
 class dustySpotCondition(condition):
     def run(self):
-        super(dustySpotCondition, self).run()
         if BLACKBOARD['DUSTY_SPOT']:
-            self.status = STATUS.SUCCEEDED
+            return STATUS.SUCCEEDED
         else:
-            self.status = STATUS.FAILED
-        return self.status
+            return STATUS.FAILED
 
-# Sequence -- derived from composite
-class sequence(composite):
-    def run(self):
-        for child in self.children:
-            status = child.run()
-            if status == STATUS.SUCCEEDED:
-                continue;                               # if SUCCEEDED, continue and check others
-            elif status == STATUS.FAILED:
-                self.status = STATUS.FAILED
-                return self.status                      # anyone FAILED, return FAILED
-            else:
-                while status == STATUS.RUNNING:
-                    continue                            # if RUNNING, continue the loop
-                if status == STATUS.SUCCEEDED:
-                    continue
-                elif status == STATUS.FAILED:
-                    self.status = STATUS.FAILED
-                    return self.status
-        self.status = STATUS.SUCCEEDED
-        return self.status                              # if no one FAILED, return SUCCEEDED
-
-# Selection -- derived from composite
-class selection(composite):
-    def run(self):
-        for child in self.children:
-            status = child.run()
-            if status == STATUS.SUCCEEDED:
-                self.status = STATUS.SUCCEEDED
-                return self.status                      # anyone SUCCEEDED, return SUCCEEDED
-            elif status == STATUS.FAILED:
-                continue                                # if FAILED, continue and check others
-            else:
-                while status == STATUS.RUNNING:
-                    continue                            # if RUNNING, continue the loop
-                if status == STATUS.SUCCEEDED:
-                    self.status = STATUS.SUCCEEDED
-                    return self.status
-                elif status == STATUS.FAILED:
-                    continue
-        self.status = STATUS.FAILED
-        return self.status                              # if no one SUCCEEDED, return FAILED
-
-# Priority -- derived from composite
-class priority(composite):
-    def run(self):
-        #self.children.sort(key = lambda x: x.)
-        for child in self.children:
-            status = child.run()
-            if status == STATUS.SUCCEEDED:
-                self.status = STATUS.SUCCEEDED
-                return self.status                      # anyone SUCCEEDED, return SUCCEEDED
-            elif status == STATUS.FAILED:
-                continue                                # if FAILED, continue and check others
-            else:
-                while status == STATUS.RUNNING:
-                    continue                            # if RUNNING, continue the loop
-                if status == STATUS.SUCCEEDED:
-                    self.status = STATUS.SUCCEEDED
-                    return self.status
-                elif status == STATUS.FAILED:
-                    continue
-        self.status = STATUS.FAILED
-        return self.status                              # if no one SUCCEEDED, return FAILED
-
-# LogicalNegation -- derived from decorator
-class logicalNegation(decorator):
-    def run(self):
-        super(logicalNegation, self).run()
-        attached = self.children[0]
-        status = attached.run()
-        if status == STATUS.SUCCEEDED:                  # negates result
-            self.status = STATUS.FAILED
-        elif status == STATUS.FAILED:
-            self.status = STATUS.SUCCEEDED              # negates result
-        return self.status
-
-# UntilFail -- derived from decorator
-class untilFail(decorator):
-    def run(self):
-        super(untilFail, self).run()
-        attached = self.children[0]
-        while attached.status != STATUS.FAILED:         # executes the attached node until FAILED
-            attached.run()
-        self.status = STATUS.SUCCEEDED
-        return self.status
-
-# Timer -- derived from decorator
-class timer(decorator):
-    def __init__(self, children = None, status = None, wait = 1, time = 0, maxTime = None):
-        super(timer, self).__init__(children, status, wait, time)
-        self.maxTime = maxTime
-
-    def run(self):
-        attached = self.children[0]
-        while attached.time < self.maxTime - 1:
-            if BLACKBOARD['BATTERY_LEVEL'] <= 0:
-                attached.status = STATUS.FAILED
-                attached.time = 0
-                self.status = STATUS.FAILED
-                return self.status
-            attached.run()
-            attached.time += 1                          # Suppose each node run 1s
-            if attached.status != STATUS.FAILED:
-                attached.status = STATUS.RUNNING
-            else:
-                self.status = STATUS.FAILED
-                attached.time = 0
-                return self.status
-
-        # last round
-        if BLACKBOARD['BATTERY_LEVEL'] <= 0:
-            attached.status = STATUS.FAILED
-            attached.time = 0
-            self.status = STATUS.FAILED
-            return self.status
-        attached.run()                                  # status is last round's status
-        if attached.status == STATUS.FAILED:
-            self.status = STATUS.FAILED
-            attached.time = 0
-            return self.status
-        attached.time = 0
-        self.status = STATUS.SUCCEEDED
-        return self.status
-
-if __name__ == '__main__':
-
-    ####### init all nodes #######
-
+def buildBT():
     # tasks
-    T_doNothing = doNothing(None, None, 3, 0)
+    T_doNothing = doNothing()
     T_findHome = findHome()
     T_goHome = goHome()
     T_dock = dock()
@@ -334,14 +291,14 @@ if __name__ == '__main__':
     C_dustySpot = dustySpotCondition()
 
     # composites
-    Sq_home = sequence(None, None, 1, 0)
+    Sq_home = sequence()
     Sq_general = sequence()
     Sq_spot = sequence()
     Sq_doneGeneral = sequence()
     Sq_battery = sequence()
     Sq_dustySpot = sequence()
 
-    Sl_clean = selection(None, None, 2, 0)
+    Sl_clean = selection()
     Sl_dustySpot = selection()
 
     P_root = priority()
@@ -349,8 +306,8 @@ if __name__ == '__main__':
     # decorators
     D_logicalNegation = logicalNegation()
     D_untilFill = untilFail()
-    D_timer20 = timer(None, None, 0, 0, 20)
-    D_timer35 = timer(None, None, 0, 0, 35)
+    D_timer20 = timer(None, 20)
+    D_timer35 = timer(None, 35)
 
 
     ########### build tree ##########
@@ -389,29 +346,31 @@ if __name__ == '__main__':
     Sq_dustySpot.addChild(D_timer35)
     D_timer35.addChild(T_cleanDustySpot)
 
-    ############## test #############
+    return P_root
+
+
+if __name__ == '__main__':
+    # test
+
+    root = buildBT()
+    status = None
+
     while(1):
-        count = 5
-        for i in range(count):
-            print("Start now")
-
-            S = int(input("Spot status: input 0 for False, input 1 for True: "))
-            if S == 0:
+        if status is None or status == STATUS.SUCCEEDED:
+            SPOT = int(input("Spot: input 0 for False, 1 for True: "))
+            if SPOT == 0:
                 BLACKBOARD['SPOT'] = False
-            G = int(input("General status: input 0 for False, input 1 for True: "))
-            if G == 0:
+            else:
+                BLACKBOARD['SPOT'] = True
+            GENERAL = int(input("General: input 0 for False, 1 for True: "))
+            if GENERAL == 0:
                 BLACKBOARD['GENERAL'] = False
-            BLACKBOARD['BATTERY_LEVEL'] = int(input("BATTERY LEVEL is: "))
+            else:
+                BLACKBOARD['GENERAL'] = True
 
-            print("Before running BT, BLACKBOARD is: ")
+        status = root.run()
+        if status == STATUS.SUCCEEDED:
+            print("SUCCEEDED! Now BLACKBOARD is: ")
             print(BLACKBOARD)
-
-            P_root.run()
-
-            print("After running BT, BLACKBOARD is: ")
-            print(BLACKBOARD)
-
-            # reset blackboard to run the next loop
-            resetBlackboard()
-
-    sys.exit()
+            if str(input("Work is done, do you want to exit?\n(y or n) y for Yes, n for No: ")) == 'y':
+                break;
